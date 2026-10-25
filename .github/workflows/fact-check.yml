@@ -1,0 +1,278 @@
+
+name: Beyond the Machine - Fact Check
+
+on:
+  workflow_run:
+    workflows:
+      - "Beyond the Machine - Script Draft"
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  research-and-review:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Download the generated script
+        uses: actions/download-artifact@v4
+        with:
+          name: gemini-script
+          path: input
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find source leads and review claims
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import html
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+          import xml.etree.ElementTree as ET
+
+          with open("input/script.txt", encoding="utf-8") as f:
+              script = f.read()
+
+          match = re.search(r"^TOPIC:\s*(.+)$", script, re.M)
+          topic = match.group(1).strip() if match else ""
+
+          api_key = os.environ.get("GEMINI_API_KEY", "")
+          bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+          if not all([topic, api_key, bot_token, chat_id]):
+              raise SystemExit("Topic or a required secret is missing.")
+
+          # Free source discovery using Google News RSS.
+          params = urllib.parse.urlencode({
+              "q": topic + " when:30d",
+              "hl": "en-US",
+              "gl": "US",
+              "ceid": "US:en"
+          })
+          rss_url = "https://news.google.com/rss/search?" + params
+
+          req = urllib.request.Request(
+              rss_url,
+              headers={"User-Agent": "BeyondTheMachineResearch/1.0"}
+          )
+
+          with urllib.request.urlopen(req, timeout=25) as response:
+              root = ET.fromstring(response.read())
+
+          sources = []
+          seen = set()
+
+          for item in root.findall("./channel/item"):
+              title = (item.findtext("title") or "").strip()
+              link = (item.findtext("link") or "").strip()
+              desc = item.findtext("description") or ""
+              source_node = item.find("source")
+              source_name = (
+                  (source_node.text or "").strip()
+                  if source_node is not None else "Unknown"
+              )
+
+              # Keep snippets short and remove HTML markup.
+              snippet = re.sub(r"<[^>]*>", " ", desc)
+              snippet = html.unescape(
+                  re.sub(r"\s+", " ", snippet)
+              ).strip()
+
+              if not title or not link or link in seen:
+                  continue
+
+              seen.add(link)
+              sources.append({
+                  "title": title,
+                  "publisher": source_name,
+                  "url": link,
+                  "snippet": snippet[:700]
+              })
+
+              if len(sources) >= 8:
+                  break
+
+          if not sources:
+              raise SystemExit(
+                  "No source leads found. Stopping instead of claiming "
+                  "the script was fact-checked."
+              )
+
+          source_text = json.dumps(sources, ensure_ascii=False)
+
+          prompt = f"""
+          You are a cautious editorial fact-check assistant for the YouTube
+          channel Beyond the Machine.
+
+          TOPIC: {topic}
+
+          SCRIPT TO REVIEW:
+          {script[:24000]}
+
+          SEARCH RESULT SOURCE LEADS (titles, publishers, URLs and RSS snippets):
+          {source_text}
+
+          Produce a concise editorial review with these sections:
+
+          1. OVERALL STATUS:
+             Say "PRELIMINARY REVIEW ONLY — NOT VERIFIED" at the top.
+
+          2. CLAIM REVIEW:
+             Identify up to 12 important factual claims in the script.
+             For each, provide the claim in short form, its status, the
+             available evidence, and relevant source URLs.
+             Use these statuses:
+             - Supported by supplied snippet
+             - Partially supported
+             - Contradicted by supplied snippet
+             - Cannot assess from supplied evidence
+
+          3. HIGH-RISK CLAIMS:
+             Flag unsupported numbers, dates, quotations, company claims,
+             scientific findings, forecasts presented as facts, and claims
+             that may be outdated.
+
+          4. SOURCE QUALITY:
+             Explain which claims need primary sources such as research
+             papers, official company announcements, government material,
+             or original technical documentation.
+
+          5. REQUIRED EDITS:
+             List specific statements to verify, qualify, correct, or remove
+             before narration is recorded.
+
+          STRICT RULES:
+          - RSS titles and snippets are leads, not proof.
+          - Do not say you opened or read an article unless its actual
+            content was supplied.
+          - Do not invent source contents, quotes, URLs or evidence.
+          - A source mentioning the same topic does not automatically
+            support a claim.
+          - Distinguish source evidence from your own inference.
+          - If sources disagree, explain the disagreement.
+          - Do not declare the script fully verified.
+          - This workflow does not browse full articles or independently
+            confirm the claims.
+          """
+
+          payload = json.dumps({
+              "contents": [{
+                  "parts": [{"text": prompt}]
+              }],
+              "generationConfig": {
+                  "temperature": 0.2,
+                  "maxOutputTokens": 7000
+              }
+          }).encode()
+
+          api_url = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              "models/gemini-3.6-flash:generateContent"
+          )
+
+          request = urllib.request.Request(
+              api_url,
+              data=payload,
+              headers={
+                  "Content-Type": "application/json",
+                  "x-goog-api-key": api_key
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=180) as response:
+                  data = json.loads(response.read())
+          except Exception as exc:
+              # Do not print API keys or request headers.
+              raise SystemExit(
+                  f"Gemini fact-check request failed: {type(exc).__name__}: "
+                  f"{exc}"
+              )
+
+          candidates = data.get("candidates", [])
+          if not candidates:
+              raise SystemExit("Gemini returned no review candidate.")
+
+          parts = candidates[0].get("content", {}).get("parts", [])
+          report = "\n".join(
+              part.get("text", "")
+              for part in parts
+              if part.get("text")
+          ).strip()
+
+          if len(report) < 200:
+              raise SystemExit("Fact-check report was unexpectedly short.")
+
+          message = (
+              "BEYOND THE MACHINE — FACT-CHECK REPORT\n"
+              f"Topic: {topic}\n\n"
+              "This is a preliminary AI review of RSS source leads. "
+              "It is NOT independent verification of article contents.\n\n"
+              + report
+              + "\n\nSOURCE LEADS COLLECTED:\n"
+          )
+
+          for i, source in enumerate(sources, 1):
+              message += (
+                  f"\n{i}. {source['title']}\n"
+                  f"Publisher: {source['publisher']}\n"
+                  f"{source['url']}\n"
+              )
+
+          # Send multiple Telegram messages below its text limit.
+          chunks = []
+          while message:
+              if len(message) <= 3500:
+                  chunks.append(message)
+                  break
+
+              cut = message.rfind("\n", 0, 3500)
+              if cut < 1500:
+                  cut = 3500
+              chunks.append(message[:cut])
+              message = message[cut:].lstrip()
+
+          import time
+
+          for i, chunk in enumerate(chunks, 1):
+              payload = json.dumps({
+                  "chat_id": chat_id,
+                  "text": f"PART {i}/{len(chunks)}\n{chunk}",
+                  "disable_web_page_preview": True
+              }).encode()
+
+              request = urllib.request.Request(
+                  f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                  data=payload,
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.loads(response.read())
+
+              if not result.get("ok"):
+                  raise SystemExit("Telegram report delivery failed.")
+
+              time.sleep(1)
+
+          print(f"Reviewed {len(sources)} source leads.")
+          print("Preliminary report delivered. No upload was attempted.")
+          PY
+          
