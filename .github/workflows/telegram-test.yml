@@ -1,0 +1,38 @@
+
+name: YouTube Automation - Telegram Test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  telegram-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check Telegram configuration
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram secrets are not configured yet."
+            exit 0
+          fi
+
+          export MESSAGE="YouTube automation runner is online. Test only; no video has been published."
+
+          RESPONSE=$(python -c 'import json,os; print(json.dumps({"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":os.environ["MESSAGE"]}))' |
+            curl --fail --silent --show-error --max-time 20 \
+              -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              --data-binary @-)
+
+          echo "$RESPONSE" | python -c 'import json,sys; d=json.load(sys.stdin); print("Telegram notification sent:", d.get("ok", False)); sys.exit(0 if d.get("ok") else 1)'
+          
