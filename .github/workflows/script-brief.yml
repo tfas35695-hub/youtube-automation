@@ -1,0 +1,146 @@
+
+name: Beyond the Machine - Script Brief
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "The AI or future-tech topic for the video"
+        required: true
+        type: string
+      angle:
+        description: "What should viewers understand?"
+        required: true
+        default: "How this technology works and what it means for the future"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Build a structured script brief
+        env:
+          TOPIC: ${{ inputs.topic }}
+          ANGLE: ${{ inputs.angle }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          import textwrap
+          import urllib.request
+
+          topic = os.environ["TOPIC"].strip()
+          angle = os.environ["ANGLE"].strip()
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+          if not token or not chat_id:
+              raise SystemExit("Telegram secrets are missing.")
+          if not topic or len(topic) > 250:
+              raise SystemExit("Topic must be 1-250 characters.")
+          if not angle or len(angle) > 300:
+              raise SystemExit("Angle must be 1-300 characters.")
+
+          sections = [
+              ("0:00-0:30", "The hook",
+               "Open with a surprising verified fact or an intriguing question. "
+               "Do not use unsupported claims."),
+              ("0:30-1:30", "Why this matters",
+               "Explain the real-world problem and why viewers should care."),
+              ("1:30-3:00", "The technology explained",
+               "Explain the core concept in plain English. Define technical terms."),
+              ("3:00-5:00", "What is actually happening",
+               "Summarize verified developments, demonstrations and announcements. "
+               "Cite original sources."),
+              ("5:00-7:00", "Potential real-world impact",
+               "Separate demonstrated capabilities from forecasts and speculation."),
+              ("7:00-9:00", "Limitations and open questions",
+               "Cover evidence gaps, technical limitations, costs, safety or concerns."),
+              ("9:00-10:30", "What comes next",
+               "Describe plausible next steps, clearly labeling predictions."),
+              ("10:30-11:00", "Conclusion",
+               "Summarize the strongest takeaway and invite viewers to subscribe.")
+          ]
+
+          lines = [
+              "BEYOND THE MACHINE | SCRIPT BRIEF",
+              "",
+              f"TOPIC: {topic}",
+              f"EDITORIAL ANGLE: {angle}",
+              "TARGET: US English-speaking audience",
+              "FORMAT: Faceless technology explainer",
+              "TARGET LENGTH: 8-12 minutes",
+              "",
+              "IMPORTANT: This is a planning brief, not a researched "
+              "or finished script. No AI model or fact-checking service "
+              "was used by this workflow.",
+              "",
+              "POTENTIAL OPENING (DRAFT TEMPLATE)",
+              f"“What does {topic} really mean, and how could it affect "
+              "the world around us? Today, we're separating what is "
+              "known from what is still uncertain.”",
+              "",
+              "STRUCTURE"
+          ]
+
+          for timestamp, title, instruction in sections:
+              lines += [
+                  "",
+                  f"{timestamp} | {title}",
+                  textwrap.fill(instruction, width=78)
+              ]
+
+          lines += [
+              "",
+              "RESEARCH CHECKLIST — COMPLETE BEFORE WRITING NARRATION",
+              "1. Find the original company, lab, paper or official announcement.",
+              "2. Find at least two independent, reputable reports where possible.",
+              "3. Check dates, names, numbers and whether demonstrations are real.",
+              "4. Distinguish measured results from marketing claims.",
+              "5. Record source URLs beside every important factual claim.",
+              "6. Include limitations, uncertainty and relevant counterarguments.",
+              "7. Do not copy another creator's script or distinctive wording.",
+              "",
+              "VIDEO PACKAGE TO PREPARE NEXT",
+              "- Full original narration with source notes",
+              "- Scene-by-scene visual and B-roll plan",
+              "- Title options and thumbnail concept",
+              "- Description, chapters and caption draft",
+              "",
+              "STATUS: BRIEF ONLY. No video generated. Nothing published.",
+              "NEXT: Review this brief and verify sources before drafting."
+          ]
+
+          message = "\n".join(lines)
+
+          payload = json.dumps({
+              "chat_id": chat_id,
+              "text": message,
+              "disable_web_page_preview": True
+          }).encode()
+
+          request = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          with urllib.request.urlopen(request, timeout=20) as response:
+              result = json.loads(response.read())
+
+          if not result.get("ok"):
+              raise SystemExit("Telegram delivery failed.")
+
+          print("Script brief sent to Telegram.")
+          print("No video was generated or published.")
+          PY
