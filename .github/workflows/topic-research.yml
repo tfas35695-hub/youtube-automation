@@ -1,0 +1,123 @@
+
+name: Beyond the Machine - Topic Research
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 13 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  topic-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Find AI and future-tech story ideas
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          import xml.etree.ElementTree as ET
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+          if not token or not chat_id:
+              raise SystemExit("Telegram secrets are missing.")
+
+          query = '"artificial intelligence" OR robotics OR "future technology"'
+          params = urllib.parse.urlencode({
+              "q": query + " when:7d",
+              "hl": "en-US",
+              "gl": "US",
+              "ceid": "US:en"
+          })
+
+          url = "https://news.google.com/rss/search?" + params
+          req = urllib.request.Request(
+              url,
+              headers={"User-Agent": "BeyondTheMachineResearch/1.0"}
+          )
+
+          with urllib.request.urlopen(req, timeout=20) as response:
+              root = ET.fromstring(response.read())
+
+          headlines = []
+          seen = set()
+
+          for item in root.findall("./channel/item"):
+              title = (item.findtext("title") or "").strip()
+              link = (item.findtext("link") or "").strip()
+              source = item.find("source")
+              source_name = (
+                  (source.text or "").strip()
+                  if source is not None else ""
+              )
+
+              if not title or not link or title.lower() in seen:
+                  continue
+
+              seen.add(title.lower())
+              headlines.append((title, source_name, link))
+
+              if len(headlines) >= 5:
+                  break
+
+          if not headlines:
+              raise SystemExit("No headlines found; stopping safely.")
+
+          lines = [
+              "BEYOND THE MACHINE",
+              "AI & FUTURE-TECH TOPIC RADAR",
+              "",
+              "Recent headlines for research — not verified conclusions.",
+              "Nothing has been generated or published.",
+              ""
+          ]
+
+          for number, (title, source, link) in enumerate(headlines, 1):
+              lines.append(f"{number}. {title}")
+              if source:
+                  lines.append(f"Source: {source}")
+              lines.append(link)
+              lines.append("")
+
+          lines.append(
+              "Next: choose a story and verify it against reliable sources."
+          )
+
+          payload = json.dumps({
+              "chat_id": chat_id,
+              "text": "\n".join(lines),
+              "disable_web_page_preview": True
+          }).encode()
+
+          request = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          with urllib.request.urlopen(request, timeout=20) as response:
+              result = json.loads(response.read())
+
+          if not result.get("ok"):
+              raise SystemExit("Telegram notification failed.")
+
+          print(
+              f"Sent {len(headlines)} topic ideas. "
+              "No video was generated or published."
+          )
+          PY
+          
