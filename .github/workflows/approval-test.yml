@@ -1,0 +1,101 @@
+
+name: Telegram Approval Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  approval-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Send approval buttons and wait for choice
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = str(os.environ["TELEGRAM_CHAT_ID"])
+          base = f"https://api.telegram.org/bot{token}/"
+
+          def api(method, data=None):
+              body = urllib.parse.urlencode(data or {}).encode()
+              req = urllib.request.Request(base + method, data=body)
+              with urllib.request.urlopen(req, timeout=25) as response:
+                  result = json.loads(response.read())
+              if not result.get("ok"):
+                  raise RuntimeError(result)
+              return result["result"]
+
+          message = api("sendMessage", {
+              "chat_id": chat_id,
+              "text": "TEST ONLY — no video will be published.\n\nChoose an approval response:",
+              "reply_markup": json.dumps({
+                  "inline_keyboard": [[
+                      {"text": "✅ Approve test", "callback_data": "test_approve"},
+                      {"text": "❌ Reject test", "callback_data": "test_reject"}
+                  ]]
+              })
+          })
+
+          message_id = message["message_id"]
+          deadline = time.time() + 270
+          offset = 0
+          print("Approval test sent. Waiting up to 4.5 minutes.")
+
+          while time.time() < deadline:
+              updates = api("getUpdates", {
+                  "offset": offset,
+                  "timeout": 15,
+                  "allowed_updates": json.dumps(["callback_query"])
+              })
+              for update in updates:
+                  offset = update["update_id"] + 1
+                  query = update.get("callback_query")
+                  if not query:
+                      continue
+                  data = query.get("data")
+                  origin = query.get("message", {})
+                  sender_chat = str(origin.get("chat", {}).get("id", ""))
+                  sender = str(query.get("from", {}).get("id", ""))
+                  if sender_chat != chat_id or sender != chat_id:
+                      api("answerCallbackQuery", {
+                          "callback_query_id": query["id"],
+                          "text": "Not authorized."
+                      })
+                      continue
+                  if origin.get("message_id") != message_id:
+                      continue
+                  if data not in ("test_approve", "test_reject"):
+                      continue
+
+                  api("answerCallbackQuery", {
+                      "callback_query_id": query["id"],
+                      "text": "Test response received."
+                  })
+                  decision = "APPROVE TEST" if data == "test_approve" else "REJECT TEST"
+                  api("editMessageText", {
+                      "chat_id": chat_id,
+                      "message_id": message_id,
+                      "text": f"{decision} received. No video was published."
+                  })
+                  print(f"Result: {decision}. No publishing action exists in this workflow.")
+                  raise SystemExit(0)
+
+          api("sendMessage", {
+              "chat_id": chat_id,
+              "text": "Approval test timed out. No video was published."
+          })
+          raise SystemExit("No approval received before timeout.")
+          PY
+          
