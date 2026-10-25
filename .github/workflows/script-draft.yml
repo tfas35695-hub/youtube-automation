@@ -68,31 +68,29 @@ jobs:
           REQUIRED OUTPUT:
 
           1. THREE compelling but accurate title options.
-          2. A strong opening hook that avoids fabricated statistics.
-          3. FULL NARRATION, with clear section headings and natural
+          2. A strong opening hook without fabricated statistics.
+          3. FULL NARRATION with clear section headings and natural
              transitions. Explain technical concepts in plain English.
-          4. VISUAL PLAN after the narration, with suggested footage,
-             diagrams, screen graphics or AI visuals for each section.
-          5. FACT-CHECK LIST: identify important factual claims that
-             require verification and suggest the primary sources to seek.
-          6. DESCRIPTION AND CHAPTERS: provide a draft description and
-             approximate timestamps.
-          7. THUMBNAIL CONCEPT: concise visual direction and short text.
+          4. VISUAL PLAN with suggested footage, diagrams, graphics,
+             and AI visuals for each section.
+          5. FACT-CHECK LIST identifying factual claims that need
+             verification and primary sources to seek.
+          6. DESCRIPTION AND CHAPTERS with approximate timestamps.
+          7. THUMBNAIL CONCEPT with visual direction and short text.
 
           EDITORIAL RULES:
-          - Do not invent quotations, studies, dates, statistics or events.
-          - Do not claim you have browsed or verified sources unless you have.
-          - Clearly label uncertain claims, predictions and hypothetical scenes.
+          - Never invent quotations, studies, dates, statistics or events.
+          - Do not claim to have browsed or verified sources unless you have.
+          - Clearly label uncertainty, predictions and hypothetical scenes.
           - Do not fabricate source URLs or citations.
-          - Distinguish current demonstrated capabilities from speculation.
-          - Include real limitations, counterarguments and safety concerns.
-          - Use original wording; do not imitate another creator's script.
-          - Do not promise that the video will go viral or make money.
-          - If information is uncertain, mark it for human verification.
-          - Write in natural US English, suitable for voice-over.
+          - Separate demonstrated capabilities from speculation.
+          - Include limitations, counterarguments and safety concerns.
+          - Use original wording and natural US English for voice-over.
+          - Do not promise virality or earnings.
+          - Mark uncertain information for human verification.
+          - End by stating that the script requires fact-checking.
 
-          End with a clear note that the script needs fact-checking before
-          recording. This is a draft, not a verified research report.
+          This is a draft, not a verified research report.
           """
 
           payload = json.dumps({
@@ -105,8 +103,8 @@ jobs:
               }
           }).encode()
 
-          # A currently documented free-tier candidate.
-          # If unavailable for this project, stop rather than use paid access.
+          # Keep this model consistent with the working configuration
+          # in your project. If unavailable, stop rather than pay.
           url = (
               "https://generativelanguage.googleapis.com/v1beta/"
               "models/gemini-3.6-flash:generateContent"
@@ -129,8 +127,8 @@ jobs:
               detail = exc.read().decode("utf-8", "replace")[:1000]
               print(f"Gemini API returned HTTP {exc.code}: {detail}")
               raise SystemExit(
-                  "Draft generation failed. Check model access, free-tier "
-                  "quota and API key. No paid upgrade was attempted."
+                  "Generation failed. Check model access and free-tier "
+                  "quota. No paid upgrade was attempted."
               )
           except Exception as exc:
               raise SystemExit(
@@ -139,10 +137,7 @@ jobs:
 
           candidates = data.get("candidates", [])
           if not candidates:
-              raise SystemExit(
-                  "Gemini returned no candidate. Check quota or safety "
-                  "feedback in the API response."
-              )
+              raise SystemExit("Gemini returned no candidate.")
 
           parts = candidates[0].get("content", {}).get("parts", [])
           script = "\n".join(
@@ -152,9 +147,13 @@ jobs:
           if len(script) < 1000:
               raise SystemExit("Gemini returned an unexpectedly short draft.")
 
-          # Telegram messages must stay below the platform's text limit.
-          # Split on paragraph boundaries where possible.
-          text = (
+          # Save script and metadata for the downstream fact-check workflow.
+          with open("script.txt", "w", encoding="utf-8") as f:
+              f.write(f"TOPIC: {topic}\n")
+              f.write(f"ANGLE: {angle}\n\n")
+              f.write(script)
+
+          message = (
               "BEYOND THE MACHINE — SCRIPT DRAFT\n"
               f"Topic: {topic}\n\n"
               "AI-generated draft. Facts and sources are NOT verified.\n"
@@ -162,26 +161,22 @@ jobs:
               + script
           )
 
+          # Split at paragraph boundaries for Telegram delivery.
           chunks = []
-          while text:
-              if len(text) <= 3500:
-                  chunks.append(text)
+          while message:
+              if len(message) <= 3500:
+                  chunks.append(message)
                   break
-
-              cut = text.rfind("\n", 0, 3500)
+              cut = message.rfind("\n", 0, 3500)
               if cut < 1500:
                   cut = 3500
-
-              chunks.append(text[:cut])
-              text = text[cut:].lstrip()
+              chunks.append(message[:cut])
+              message = message[cut:].lstrip()
 
           for index, chunk in enumerate(chunks, 1):
-              header = f"PART {index}/{len(chunks)}\n"
-              message = header + chunk
-
               body = json.dumps({
                   "chat_id": chat_id,
-                  "text": message,
+                  "text": f"PART {index}/{len(chunks)}\n{chunk}",
                   "disable_web_page_preview": True
               }).encode()
 
@@ -192,23 +187,24 @@ jobs:
                   method="POST"
               )
 
-              try:
-                  with urllib.request.urlopen(req, timeout=30) as response:
-                      result = json.loads(response.read())
-              except Exception as exc:
-                  raise SystemExit(
-                      f"Telegram delivery failed on part {index}: {exc}"
-                  )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  result = json.loads(response.read())
 
               if not result.get("ok"):
-                  raise SystemExit(
-                      f"Telegram rejected part {index}; stopping."
-                  )
+                  raise SystemExit("Telegram delivery failed.")
 
               if index < len(chunks):
                   time.sleep(1)
 
-          print(f"Draft delivered to Telegram in {len(chunks)} parts.")
-          print("No video generated. No YouTube upload attempted.")
+          print("Script generated, saved and sent to Telegram.")
+          print("No YouTube upload or publication was attempted.")
           PY
+
+      - name: Save script for fact-checking
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-script
+          path: script.txt
+          retention-days: 7
+          if-no-files-found: error
           
