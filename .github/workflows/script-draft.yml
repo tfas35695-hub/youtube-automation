@@ -1,0 +1,214 @@
+
+name: Beyond the Machine - Script Draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Video topic"
+        required: true
+        type: string
+      angle:
+        description: "Main question or angle"
+        required: true
+        default: "Explain what is real, what remains difficult, and what comes next"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  draft-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Generate script with Gemini Free Tier
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TOPIC: ${{ inputs.topic }}
+          ANGLE: ${{ inputs.angle }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          api_key = os.environ.get("GEMINI_API_KEY", "")
+          bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          topic = os.environ["TOPIC"].strip()
+          angle = os.environ["ANGLE"].strip()
+
+          if not all([api_key, bot_token, chat_id]):
+              raise SystemExit("A required GitHub secret is missing.")
+
+          if not topic or len(topic) > 250:
+              raise SystemExit("Topic must contain 1-250 characters.")
+
+          if not angle or len(angle) > 300:
+              raise SystemExit("Angle must contain 1-300 characters.")
+
+          prompt = f"""
+          You are the scriptwriter for Beyond the Machine, a faceless
+          YouTube channel about AI and future technology for a US audience.
+
+          TOPIC: {topic}
+          EDITORIAL ANGLE: {angle}
+
+          Write an original, engaging narration designed for 8-12 minutes,
+          approximately 1,200-1,600 spoken words.
+
+          REQUIRED OUTPUT:
+
+          1. THREE compelling but accurate title options.
+          2. A strong opening hook that avoids fabricated statistics.
+          3. FULL NARRATION, with clear section headings and natural
+             transitions. Explain technical concepts in plain English.
+          4. VISUAL PLAN after the narration, with suggested footage,
+             diagrams, screen graphics or AI visuals for each section.
+          5. FACT-CHECK LIST: identify important factual claims that
+             require verification and suggest the primary sources to seek.
+          6. DESCRIPTION AND CHAPTERS: provide a draft description and
+             approximate timestamps.
+          7. THUMBNAIL CONCEPT: concise visual direction and short text.
+
+          EDITORIAL RULES:
+          - Do not invent quotations, studies, dates, statistics or events.
+          - Do not claim you have browsed or verified sources unless you have.
+          - Clearly label uncertain claims, predictions and hypothetical scenes.
+          - Do not fabricate source URLs or citations.
+          - Distinguish current demonstrated capabilities from speculation.
+          - Include real limitations, counterarguments and safety concerns.
+          - Use original wording; do not imitate another creator's script.
+          - Do not promise that the video will go viral or make money.
+          - If information is uncertain, mark it for human verification.
+          - Write in natural US English, suitable for voice-over.
+
+          End with a clear note that the script needs fact-checking before
+          recording. This is a draft, not a verified research report.
+          """
+
+          payload = json.dumps({
+              "contents": [{
+                  "parts": [{"text": prompt}]
+              }],
+              "generationConfig": {
+                  "temperature": 0.7,
+                  "maxOutputTokens": 8192
+              }
+          }).encode()
+
+          # A currently documented free-tier candidate.
+          # If unavailable for this project, stop rather than use paid access.
+          url = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              "models/gemini-3.6-flash:generateContent"
+          )
+
+          request = urllib.request.Request(
+              url,
+              data=payload,
+              headers={
+                  "Content-Type": "application/json",
+                  "x-goog-api-key": api_key
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=180) as response:
+                  data = json.loads(response.read())
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", "replace")[:1000]
+              print(f"Gemini API returned HTTP {exc.code}: {detail}")
+              raise SystemExit(
+                  "Draft generation failed. Check model access, free-tier "
+                  "quota and API key. No paid upgrade was attempted."
+              )
+          except Exception as exc:
+              raise SystemExit(
+                  f"Gemini request failed: {type(exc).__name__}: {exc}"
+              )
+
+          candidates = data.get("candidates", [])
+          if not candidates:
+              raise SystemExit(
+                  "Gemini returned no candidate. Check quota or safety "
+                  "feedback in the API response."
+              )
+
+          parts = candidates[0].get("content", {}).get("parts", [])
+          script = "\n".join(
+              p.get("text", "") for p in parts if p.get("text")
+          ).strip()
+
+          if len(script) < 1000:
+              raise SystemExit("Gemini returned an unexpectedly short draft.")
+
+          # Telegram messages must stay below the platform's text limit.
+          # Split on paragraph boundaries where possible.
+          text = (
+              "BEYOND THE MACHINE — SCRIPT DRAFT\n"
+              f"Topic: {topic}\n\n"
+              "AI-generated draft. Facts and sources are NOT verified.\n"
+              "Nothing has been uploaded or published.\n\n"
+              + script
+          )
+
+          chunks = []
+          while text:
+              if len(text) <= 3500:
+                  chunks.append(text)
+                  break
+
+              cut = text.rfind("\n", 0, 3500)
+              if cut < 1500:
+                  cut = 3500
+
+              chunks.append(text[:cut])
+              text = text[cut:].lstrip()
+
+          for index, chunk in enumerate(chunks, 1):
+              header = f"PART {index}/{len(chunks)}\n"
+              message = header + chunk
+
+              body = json.dumps({
+                  "chat_id": chat_id,
+                  "text": message,
+                  "disable_web_page_preview": True
+              }).encode()
+
+              req = urllib.request.Request(
+                  f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                  data=body,
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      result = json.loads(response.read())
+              except Exception as exc:
+                  raise SystemExit(
+                      f"Telegram delivery failed on part {index}: {exc}"
+                  )
+
+              if not result.get("ok"):
+                  raise SystemExit(
+                      f"Telegram rejected part {index}; stopping."
+                  )
+
+              if index < len(chunks):
+                  time.sleep(1)
+
+          print(f"Draft delivered to Telegram in {len(chunks)} parts.")
+          print("No video generated. No YouTube upload attempted.")
+          PY
+          
