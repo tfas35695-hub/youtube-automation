@@ -1,0 +1,231 @@
+
+name: Beyond the Machine - Gemini Creator Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      skill:
+        description: "Choose a YouTube agent skill"
+        required: true
+        type: choice
+        options:
+          - yt-script
+          - yt-package
+          - yt-edit
+          - yt-comment
+          - yt-plan
+          - yt-viral
+          - yt-retention
+          - yt-shorts
+          - yt-seo
+          - yt-chapters
+          - yt-audit
+      topic:
+        description: "Topic or task"
+        required: true
+        type: string
+      material:
+        description: "Optional transcript, comments, data or extra instructions"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  creator-suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Load the original YouTube agent skill pack
+        run: |
+          git clone --depth 1 \
+            https://github.com/Jakeschincariol/youtube-agent-skill.git \
+            /tmp/youtube-agent-skill
+
+      - name: Run selected skill with Gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SELECTED_SKILL: ${{ inputs.skill }}
+          TOPIC: ${{ inputs.topic }}
+          MATERIAL: ${{ inputs.material }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+          from pathlib import Path
+
+          api_key = os.environ.get("GEMINI_API_KEY", "")
+          bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          skill = os.environ["SELECTED_SKILL"].strip()
+          topic = os.environ["TOPIC"].strip()
+          material = os.environ.get("MATERIAL", "").strip()
+
+          allowed = {
+              "yt-script", "yt-package", "yt-edit", "yt-comment",
+              "yt-plan", "yt-viral", "yt-retention", "yt-shorts",
+              "yt-seo", "yt-chapters", "yt-audit"
+          }
+
+          if skill not in allowed:
+              raise SystemExit("Unknown skill.")
+          if not all([api_key, bot_token, chat_id]):
+              raise SystemExit("A required GitHub secret is missing.")
+          if not topic or len(topic) > 5000:
+              raise SystemExit("Topic must contain 1-5000 characters.")
+          if len(material) > 30000:
+              raise SystemExit("Material is too long; limit is 30000 characters.")
+
+          skill_file = (
+              Path("/tmp/youtube-agent-skill")
+              / "skills" / skill / "SKILL.md"
+          )
+
+          if not skill_file.is_file():
+              raise SystemExit(f"Skill file not found: {skill}")
+
+          skill_instructions = skill_file.read_text(encoding="utf-8")
+
+          prompt = f"""
+          You are the Gemini adaptation of the YouTube Agent Skill for
+          Beyond the Machine, an AI and future-technology channel targeting
+          a US English-speaking audience.
+
+          Apply the selected skill instructions below to the user's task.
+          Keep output practical, specific and ready to review.
+
+          SELECTED SKILL: {skill}
+
+          ORIGINAL SKILL INSTRUCTIONS:
+          {skill_instructions[:18000]}
+
+          CHANNEL CONTEXT:
+          - Faceless AI and future-tech explainers.
+          - Long-form videos target 8-12 minutes.
+          - Audience: US English-speaking viewers.
+          - Free-first workflow.
+          - No public upload or publishing actions are permitted.
+
+          USER TASK:
+          {topic}
+
+          OPTIONAL USER MATERIAL:
+          {material if material else "(No additional material supplied.)"}
+
+          SAFETY AND QUALITY RULES:
+          - Do not invent facts, statistics, quotes, sources or analytics.
+          - Clearly state when the provided material is insufficient.
+          - For trend analysis, do not pretend to have browsed live data.
+          - For retention analysis, do not invent retention figures.
+          - For comment analysis, use only comments supplied by the user.
+          - For editing and Shorts, use only available transcript or timecode data.
+          - For chapters, mark estimated timestamps if no timed transcript exists.
+          - For SEO, do not promise rankings or views.
+          - For scripts, include multiple hooks and on-screen visual cues.
+          - For titles and thumbnails, assess them as one combined package.
+          - Keep advice ethical, original and evidence-conscious.
+          - Do not publish, upload, delete or change any YouTube content.
+          - End with a short list of what the user should review next.
+
+          Return the completed task, not a description of how you would do it.
+          """
+
+          payload = json.dumps({
+              "contents": [{
+                  "parts": [{"text": prompt}]
+              }],
+              "generationConfig": {
+                  "temperature": 0.5,
+                  "maxOutputTokens": 8192
+              }
+          }).encode()
+
+          api_url = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              "models/gemini-3.6-flash:generateContent"
+          )
+
+          request = urllib.request.Request(
+              api_url,
+              data=payload,
+              headers={
+                  "Content-Type": "application/json",
+                  "x-goog-api-key": api_key
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=180) as response:
+                  data = json.loads(response.read())
+          except Exception as exc:
+              raise SystemExit(
+                  f"Gemini request failed: {type(exc).__name__}: {exc}"
+              )
+
+          candidates = data.get("candidates", [])
+          if not candidates:
+              raise SystemExit("Gemini returned no response candidate.")
+
+          parts = candidates[0].get("content", {}).get("parts", [])
+          result_text = "\n".join(
+              part.get("text", "") for part in parts if part.get("text")
+          ).strip()
+
+          if len(result_text) < 100:
+              raise SystemExit("Gemini response was unexpectedly short.")
+
+          message = (
+              f"BEYOND THE MACHINE — {skill.upper()}\n\n"
+              f"Task: {topic}\n\n"
+              "Gemini skill adaptation. Review factual claims before use.\n"
+              "Nothing has been uploaded or published.\n\n"
+              + result_text
+          )
+
+          chunks = []
+          while message:
+              if len(message) <= 3500:
+                  chunks.append(message)
+                  break
+              cut = message.rfind("\n", 0, 3500)
+              if cut < 1500:
+                  cut = 3500
+              chunks.append(message[:cut])
+              message = message[cut:].lstrip()
+
+          for index, chunk in enumerate(chunks, 1):
+              body = json.dumps({
+                  "chat_id": chat_id,
+                  "text": f"PART {index}/{len(chunks)}\n{chunk}",
+                  "disable_web_page_preview": True
+              }).encode()
+
+              req = urllib.request.Request(
+                  f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                  data=body,
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  sent = json.loads(response.read())
+
+              if not sent.get("ok"):
+                  raise SystemExit("Telegram delivery failed.")
+
+              if index < len(chunks):
+                  time.sleep(1)
+
+          print(f"Completed {skill}; sent {len(chunks)} Telegram message(s).")
+          print("No YouTube upload or publishing was attempted.")
+          PY
+          
